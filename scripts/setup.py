@@ -18,9 +18,13 @@ Evaluators (used for online trace scoring):
   professional_tone     — agent avoids casual greetings/emojis (catches Context Hub bugs)
   factual_accuracy      — agent gave correct LangChain/LangGraph/LangSmith facts
 
+The evaluator judge model routes through the LangSmith LLM Gateway and reads
+its key from the ANTHROPIC_API_KEY workspace secret (Settings → Secrets).
+
 Usage:
     python -m scripts.setup                                # full setup (recommended)
     python -m scripts.setup --skip-baseline-experiments    # faster, no seed experiments
+    python -m scripts.setup --check-evaluators             # verify online evals are scoring
 """
 
 import json
@@ -35,6 +39,13 @@ load_dotenv(override=True)
 from evals.dataset import DATASET_NAME, DEMO_PRESENTER
 PROJECT_NAME = os.getenv("LANGSMITH_PROJECT", "chat-lc-lite")
 WORKSPACE_ID = os.getenv("LANGSMITH_WORKSPACE_ID", "").strip()
+
+EVALUATOR_MODEL = "claude-haiku-4-5-20251001"
+EVALUATOR_GATEWAY_URL = "https://gateway.smith.langchain.com/anthropic"
+EVALUATOR_SECRET = "ANTHROPIC_API_KEY"
+# Only the root run carries the agent's final output; child LLM/tool/chain
+# runs would each trigger a meaningless (and billed) judge call.
+ROOT_RUN_FILTER = "eq(is_root, true)"
 
 
 def _ls_headers(api_key: str, json_body: bool = False) -> dict:
@@ -244,6 +255,7 @@ def create_online_evaluator(api_key: str, ev: dict, project_id: str, model_json:
         "display_name": ev["feedback_key"],
         "session_id": project_id,
         "sampling_rate": 1.0,
+        "filter": ROOT_RUN_FILTER,
         "evaluators": [
             {
                 "structured": {
@@ -283,15 +295,85 @@ def create_online_evaluator(api_key: str, ev: dict, project_id: str, model_json:
         return None
 
 
+def evaluator_model_json() -> dict:
+    """Serialize the judge model so it calls Anthropic through the LangSmith Gateway."""
+    from langchain_anthropic import ChatAnthropic
+
+    return ChatAnthropic(model=EVALUATOR_MODEL, base_url=EVALUATOR_GATEWAY_URL).to_json()
+
+
+def check_evaluator_secret(api_key: str) -> bool:
+    """Return True if the workspace has the secret the judge model authenticates with."""
+    fix_hint = (
+        f"     Add {EVALUATOR_SECRET} in LangSmith → Settings → Secrets with a LangSmith "
+        f"Gateway key (the same value as LANGSMITH_API_KEY_GATEWAY)."
+    )
+    try:
+        resp = requests.get(
+            "https://api.smith.langchain.com/api/v1/workspaces/current/secrets",
+            headers=_ls_headers(api_key),
+        )
+    except requests.RequestException as e:
+        print(f"  ⚠️  Could not verify workspace secret {EVALUATOR_SECRET}: {e}\n{fix_hint}")
+        return False
+    if resp.status_code != 200:
+        print(
+            f"  ⚠️  Could not verify workspace secret {EVALUATOR_SECRET}: "
+            f"{resp.status_code} {resp.text[:200]}\n{fix_hint}"
+        )
+        return False
+    if any(s.get("key") == EVALUATOR_SECRET for s in resp.json()):
+        print(f"  ✅ Workspace secret {EVALUATOR_SECRET} is set")
+        return True
+    print(
+        f"  ❌ Workspace secret {EVALUATOR_SECRET} is missing — every online evaluator "
+        f"will fail to authenticate.\n{fix_hint}"
+    )
+    return False
+
+
+def check_online_evaluators(api_key: str, rule_ids: list) -> list:
+    """Return error messages for rules whose latest evaluation failed or whose logs are unreadable."""
+    failures = []
+    for rule_id in rule_ids:
+        try:
+            resp = requests.get(
+                f"https://api.smith.langchain.com/api/v1/runs/rules/{rule_id}/logs",
+                headers=_ls_headers(api_key),
+                params={"limit": 50},
+            )
+        except requests.RequestException as e:
+            failures.append(f"{rule_id}: logs request failed: {e}")
+            continue
+        if resp.status_code != 200:
+            failures.append(f"{rule_id}: logs request failed: {resp.status_code} {resp.text[:200]}")
+            continue
+        # Logs are per processing window; windows with no matching runs have evaluators=null.
+        latest = next((log["evaluators"] for log in resp.json() if log.get("evaluators")), None)
+        if latest is None:
+            print(f"  ⏳ {rule_id}: no runs evaluated yet")
+        elif latest.get("outcome") == "error":
+            errors = (latest.get("payload") or {}).get("errors") or []
+            text = str(errors[0]) if errors else "unknown error"
+            start = max(text.find("'error': "), 0)
+            detail = text[start:start + 300]
+            failures.append(f"{rule_id}: evaluator error: {detail}")
+        else:
+            print(f"  ✅ {rule_id}: {latest.get('outcome')}")
+    for failure in failures:
+        print(f"  ❌ {failure}")
+    return failures
+
+
 def setup_online_evaluators(api_key: str) -> list:
     from langsmith import Client
-    from langchain_anthropic import ChatAnthropic
 
     print(f"\n[3/4] Setting up online evaluators on project '{PROJECT_NAME}'...")
 
     ls_client = Client()
     project_id = get_project_id(ls_client, PROJECT_NAME)
-    model_json = ChatAnthropic(model="claude-haiku-4-5-20251001").to_json()
+    model_json = evaluator_model_json()
+    check_evaluator_secret(api_key)
 
     delete_existing_evaluators(api_key)
 
@@ -350,12 +432,26 @@ def main():
         help="Skip seeding baseline experiments (faster setup, but the dataset's "
              "experiment list will be empty for the demo).",
     )
+    parser.add_argument(
+        "--check-evaluators",
+        action="store_true",
+        help="Only check the latest rule logs of the online evaluators created by "
+             "setup and exit non-zero if any of them errored.",
+    )
     args = parser.parse_args()
 
     api_key = os.getenv("LANGSMITH_API_KEY")
     if not api_key:
         print("Error: LANGSMITH_API_KEY not set.")
         sys.exit(1)
+
+    if args.check_evaluators:
+        with open(".demo_state.json") as f:
+            rule_ids = json.load(f).get("run_rule_ids", [])
+        print(f"\nChecking {len(rule_ids)} online evaluator(s)...")
+        if check_online_evaluators(api_key, rule_ids):
+            sys.exit(1)
+        return
 
     from utils.context_hub import push_agents_md, push_demo_skills
     push_agents_md()
@@ -376,7 +472,8 @@ def main():
     print(f"\nSetup complete.")
     print(f"  Dataset:      {DATASET_NAME}")
     print(f"  Project:      {PROJECT_NAME}")
-    print(f"  Online evals: scoring all new traces automatically")
+    print("  Online evals: scoring new root traces; after generating traces, verify with")
+    print("                python -m scripts.setup --check-evaluators")
 
 
 if __name__ == "__main__":

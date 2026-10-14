@@ -67,7 +67,9 @@ python -m scripts.setup
 This does three things in one command:
 1. **Creates the LangSmith project** by sending one trace (required before online evaluators can be registered)
 2. **Creates the dataset** `chat-lc-lite-scope-<your-name>` with 3 curated test cases, then tags that version as `baseline` in LangSmith
-3. **Creates 6 online evaluators** in the LangSmith Evaluators UI at 100% sampling rate — every future trace is automatically scored for `security_advice`, `scope_adherence`, `tool_usage`, `response_completeness`, `professional_tone`, and `factual_accuracy`. Their run rule IDs are saved to `.demo_state.json` so cleanup can tell them apart from evaluators Engine adds.
+3. **Creates 6 online evaluators** in the LangSmith Evaluators UI at 100% sampling rate — every future trace (root run only) is automatically scored for `security_advice`, `scope_adherence`, `tool_usage`, `response_completeness`, `professional_tone`, and `factual_accuracy`. Their run rule IDs are saved to `.demo_state.json` so cleanup can tell them apart from evaluators Engine adds.
+
+> **Online evaluator prerequisite:** the evaluators' judge model (Claude Haiku) calls Anthropic through the LangSmith LLM Gateway (`https://gateway.smith.langchain.com/anthropic`) and authenticates with the `ANTHROPIC_API_KEY` **workspace secret**, not your local `.env`. Add it in LangSmith → Settings → Secrets with your gateway key (the same value as `LANGSMITH_API_KEY_GATEWAY`). Setup reports whether the secret is present; without it every evaluator errors and no scores appear.
 
 Only needs to be run once. Between demos, run `python -m scripts.cleanup` instead.
 
@@ -77,6 +79,11 @@ python -m scripts.generate_traces
 ```
 
 Runs 11 single-turn queries and 1 multi-turn threaded conversation through the buggy agent to populate LangSmith with trace and thread variety beyond the dataset examples.
+
+A few minutes later, confirm the online evaluators are scoring (prints the error and exits non-zero if any evaluator failed):
+```bash
+python -m scripts.setup --check-evaluators
+```
 
 **6. Add GitHub Actions secrets and variables** (for CI/CD)
 
