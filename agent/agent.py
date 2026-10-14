@@ -34,9 +34,25 @@ def _model_id() -> str:
 # playbooks) — it is a read-only reference, NOT a user-delivery channel.
 _READONLY_FS_TOOLS = {"ls", "read_file", "glob", "grep"}
 
+# Replaces deepagents' generic filesystem prompt and read_file description,
+# which advertise write tools and tell the model to trust user-provided paths.
+_READONLY_FS_SYSTEM_PROMPT = """## Reference Files `ls`, `read_file`, `glob`, `grep`
+
+These read-only tools access only your own internal reference files (paths start with /). They cannot reach the user's machine or repository, so when a user wants help with their code or logs, ask them to paste it into the chat.
+
+Oversized tool results may be offloaded to `/large_tool_results/<tool_call_id>`; inspect them with `read_file` (offset/limit)."""
+
+_READONLY_FS_TOOL_DESCRIPTIONS = {
+    "read_file": "Reads one of your own internal reference files (not the user's files). Use offset/limit to paginate large files.",
+}
+
 
 def _readonly_context_hub_fs() -> FilesystemMiddleware:
-    fs = FilesystemMiddleware(backend=ContextHubBackend(CONTEXT_HUB_REPO))
+    fs = FilesystemMiddleware(
+        backend=ContextHubBackend(CONTEXT_HUB_REPO),
+        system_prompt=_READONLY_FS_SYSTEM_PROMPT,
+        custom_tool_descriptions=_READONLY_FS_TOOL_DESCRIPTIONS,
+    )
     fs.tools = [t for t in fs.tools if t.name in _READONLY_FS_TOOLS]
     return fs
 
