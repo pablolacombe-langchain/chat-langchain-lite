@@ -792,7 +792,8 @@ async def gateway(session):
     # cached; keeping it out of module scope avoids coupling app startup to the
     # model provider package.
     try:
-        from utils.models import MODEL_CONFIG
+        from utils.models import MODEL_CONFIG, model_id
+        MODEL_CONFIG = {**MODEL_CONFIG, "model": model_id()}
     except Exception:
         MODEL_CONFIG = {}
     base_url = MODEL_CONFIG.get("base_url") or ""

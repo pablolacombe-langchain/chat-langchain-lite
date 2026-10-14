@@ -1,5 +1,3 @@
-import os
-
 from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessageChunk, ToolMessage
@@ -11,7 +9,7 @@ from deepagents.backends.context_hub import ContextHubBackend
 from agent.tools import TOOLS
 from context import CONTEXT_HUB_REPO, get_prompt
 from utils.streaming import iter_text
-from utils.models import model
+from utils.models import get_model, model_id
 
 # AGENTS.md is the agent's system prompt — pulled fresh from LangSmith
 # Context Hub at module import.
@@ -21,13 +19,11 @@ from utils.models import model
 SYSTEM_PROMPT = get_prompt()
 
 # Override with CHAT_LANGCHAIN_LITE_MODEL env var — used by setup.py to seed
-# baseline experiments against a more expensive model (Sonnet) for the
-# demo's cost/latency comparison.
-_DEFAULT_MODEL = "claude-haiku-4-5-20251001"
-
-
+# baseline experiments per model (Haiku vs Sonnet) for the demo's cost/latency
+# comparison. Shares utils.models.model_id() with get_model() so run metadata
+# always names the model actually served.
 def _model_id() -> str:
-    return os.getenv("CHAT_LANGCHAIN_LITE_MODEL") or _DEFAULT_MODEL
+    return model_id()
 
 
 # The Context Hub-backed filesystem holds the agent's OWN context (AGENTS.md,
@@ -46,7 +42,7 @@ def build_agent():
         # temperature=0 for deterministic, reproducible demo behavior — the
         # intentional bugs (tone, scope, truncation) come from the prompt and
         # max_tokens, not sampling, so pinning temperature keeps traces consistent.
-        model=model,
+        model=get_model(),
         tools=TOOLS,
         system_prompt=SYSTEM_PROMPT,
         middleware=[_readonly_context_hub_fs()],
